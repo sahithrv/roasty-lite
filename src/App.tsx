@@ -43,6 +43,8 @@ type ClaudeAnalyzeResponse = {
   error?: string;
 };
 
+type AppStage = "intake" | "analyzing" | "review";
+
 const fakeEvents: GameplayEvent[] = [
   {
     id: "evt-01",
@@ -279,6 +281,12 @@ function normalizeIncomingClips(clips: ClaudeAnalyzeResponse["clips"]): Suggeste
     .sort((a, b) => b.clipScore - a.clipScore);
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function App() {
   const [events, setEvents] = useState<GameplayEvent[]>(fakeEvents);
   const [suggestedClips, setSuggestedClips] = useState<SuggestedClip[]>([]);
@@ -287,8 +295,10 @@ function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiSource, setAiSource] = useState("Offline mock scorer");
   const [aiError, setAiError] = useState<string | null>(null);
+  const [exportComplete, setExportComplete] = useState(false);
 
   const analyzed = suggestedClips.length > 0;
+  const stage: AppStage = isAnalyzing ? "analyzing" : analyzed ? "review" : "intake";
 
   const metrics = useMemo(() => {
     const approved = suggestedClips.filter((clip) => clip.humanDecision === "Saved").length;
@@ -315,6 +325,8 @@ function App() {
   async function analyzeMoments() {
     setIsAnalyzing(true);
     setAiError(null);
+    setExportComplete(false);
+    const minimumLoadingTime = wait(900);
 
     try {
       const response = await fetch("/api/analyze", {
@@ -325,6 +337,7 @@ function App() {
         body: JSON.stringify({ events: fakeEvents }),
       });
       const data = (await response.json()) as ClaudeAnalyzeResponse;
+      await minimumLoadingTime;
 
       if (!response.ok) {
         throw new Error(data.error || "Claude analysis failed.");
@@ -341,6 +354,7 @@ function App() {
       setEditingClipId(null);
       setAiSource(`Claude API: ${data.source || "live analysis"}`);
     } catch (error) {
+      await minimumLoadingTime;
       const rankedClips = buildMockClips();
       setEvents(fakeEvents.map((event) => ({ ...event, status: "Analyzed" })));
       setSuggestedClips(rankedClips);
@@ -361,10 +375,12 @@ function App() {
     setIsAnalyzing(false);
     setAiSource("Offline mock scorer");
     setAiError(null);
+    setExportComplete(false);
   }
 
   function updateCaption(clipId: string, finalCaption: string) {
     setSuggestedClips((clips) => clips.map((clip) => (clip.id === clipId ? { ...clip, finalCaption } : clip)));
+    setExportComplete(false);
   }
 
   function addAuditEntry(clip: SuggestedClip, humanDecision: HumanDecision) {
@@ -387,51 +403,53 @@ function App() {
 
     setSuggestedClips((clips) => clips.map((item) => (item.id === clipId ? { ...item, humanDecision } : item)));
     addAuditEntry(clip, humanDecision);
+    setExportComplete(false);
+  }
+
+  function exportSelectedClips() {
+    if (postQueue.length === 0) return;
+    setExportComplete(true);
   }
 
   return (
     <main className="app-shell">
       <DashboardHeader
-        analyzed={analyzed}
-        isAnalyzing={isAnalyzing}
+        stage={stage}
         aiSource={aiSource}
         aiError={aiError}
-        onAnalyze={analyzeMoments}
         onReset={resetDemo}
       />
-      <MetricsBar metrics={metrics} />
 
-      <section className="dashboard-grid">
-        <LiveEventFeed events={events} />
-        <SuggestedClipsPanel
+      {stage === "intake" ? <IntakeView events={events} onAnalyze={analyzeMoments} /> : null}
+      {stage === "analyzing" ? <AnalyzingView events={events} aiSource={aiSource} /> : null}
+      {stage === "review" ? (
+        <ReviewWorkspace
+          metrics={metrics}
           clips={suggestedClips}
+          reviewQueue={reviewQueue}
+          postQueue={postQueue}
+          auditLog={auditLog}
           editingClipId={editingClipId}
+          exportComplete={exportComplete}
           onEdit={setEditingClipId}
           onCaptionChange={updateCaption}
           onDecision={decideClip}
+          onExport={exportSelectedClips}
         />
-        <HumanReviewQueue clips={reviewQueue} onDecision={decideClip} />
-        <PostQueue clips={postQueue} />
-      </section>
-
-      <AuditLog entries={auditLog} />
+      ) : null}
     </main>
   );
 }
 
 function DashboardHeader({
-  analyzed,
-  isAnalyzing,
+  stage,
   aiSource,
   aiError,
-  onAnalyze,
   onReset,
 }: {
-  analyzed: boolean;
-  isAnalyzing: boolean;
+  stage: AppStage;
   aiSource: string;
   aiError: string | null;
-  onAnalyze: () => void;
   onReset: () => void;
 }) {
   return (
@@ -442,20 +460,114 @@ function DashboardHeader({
         <p className="hero-copy">AI suggests clip-worthy gameplay moments. The creator decides what gets saved.</p>
       </div>
       <div className="hero-actions">
+        <span className="stage-pill">Step {stage === "intake" ? "1" : stage === "analyzing" ? "2" : "3"} of 3</span>
         <span className="live-pill">
           <span className="live-dot" />
           Fake Rocket League stream
         </span>
         <span className="ai-source">AI engine: {aiSource}</span>
         {aiError ? <span className="ai-warning">Fallback active: {aiError}</span> : null}
-        <button className="primary-button" onClick={onAnalyze} disabled={isAnalyzing}>
-          {isAnalyzing ? "Analyzing..." : analyzed ? "Re-analyze moments" : "Analyze moments"}
-        </button>
         <button className="ghost-button" onClick={onReset}>
           Reset demo
         </button>
       </div>
     </header>
+  );
+}
+
+function IntakeView({ events, onAnalyze }: { events: GameplayEvent[]; onAnalyze: () => void }) {
+  return (
+    <section className="flow-grid">
+      <article className="panel intake-panel">
+        <p className="eyebrow">Match Intake</p>
+        <h2>Scan the stream for clip candidates</h2>
+        <p>
+          Roasty-Lite starts with fake match telemetry, then asks AI to identify which moments are worth a creator's time.
+        </p>
+        <div className="intake-actions">
+          <button className="primary-button" onClick={onAnalyze}>
+            Start AI analysis
+          </button>
+          <span>{events.length} gameplay events ready</span>
+        </div>
+      </article>
+      <LiveEventFeed events={events.slice(0, 5)} compact />
+    </section>
+  );
+}
+
+function AnalyzingView({ events, aiSource }: { events: GameplayEvent[]; aiSource: string }) {
+  return (
+    <section className="panel analyzing-panel">
+      <div className="loader-ring" />
+      <p className="eyebrow">Analyzing Match Data</p>
+      <h2>Scoring clip potential from fake gameplay events</h2>
+      <p>
+        Reviewing {events.length} events for intensity, chat reaction, rarity, mistake value, and social caption fit.
+      </p>
+      <div className="scan-list" aria-label="Analysis progress">
+        <span>Reading event feed</span>
+        <span>Ranking viral potential</span>
+        <span>Generating captions</span>
+        <span>Preparing human review queue</span>
+      </div>
+      <div className="scan-bar">
+        <span />
+      </div>
+      <small>Current engine: {aiSource}</small>
+    </section>
+  );
+}
+
+function ReviewWorkspace({
+  metrics,
+  clips,
+  reviewQueue,
+  postQueue,
+  auditLog,
+  editingClipId,
+  exportComplete,
+  onEdit,
+  onCaptionChange,
+  onDecision,
+  onExport,
+}: {
+  metrics: {
+    eventsScanned: number;
+    suggested: number;
+    approved: number;
+    discarded: number;
+    averageScore: number;
+  };
+  clips: SuggestedClip[];
+  reviewQueue: SuggestedClip[];
+  postQueue: SuggestedClip[];
+  auditLog: AuditEntry[];
+  editingClipId: string | null;
+  exportComplete: boolean;
+  onEdit: (clipId: string | null) => void;
+  onCaptionChange: (clipId: string, caption: string) => void;
+  onDecision: (clipId: string, decision: HumanDecision) => void;
+  onExport: () => void;
+}) {
+  return (
+    <>
+      <MetricsBar metrics={metrics} />
+      <section className="review-workspace">
+        <SuggestedClipsPanel
+          clips={clips}
+          editingClipId={editingClipId}
+          onEdit={onEdit}
+          onCaptionChange={onCaptionChange}
+          onDecision={onDecision}
+        />
+        <aside className="export-column">
+          <ExportPanel clips={postQueue} exportComplete={exportComplete} onExport={onExport} />
+          <HumanReviewQueue clips={reviewQueue} onDecision={onDecision} />
+        </aside>
+      </section>
+      <AuditLog entries={auditLog} />
+    </>
   );
 }
 
@@ -490,10 +602,10 @@ function Metric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function LiveEventFeed({ events }: { events: GameplayEvent[] }) {
+function LiveEventFeed({ events, compact = false }: { events: GameplayEvent[]; compact?: boolean }) {
   return (
     <section className="panel feed-panel">
-      <PanelTitle title="Live Event Feed" subtitle="Offline fake stream" />
+      <PanelTitle title="Live Event Feed" subtitle={compact ? "Preview of incoming events" : "Offline fake stream"} />
       <div className="event-list">
         {events.map((event) => (
           <article className="event-row" key={event.id}>
@@ -573,12 +685,11 @@ function SuggestedClipsPanel({
               </div>
 
               <div className="button-row">
-                <button onClick={() => onDecision(clip.id, "Saved")}>Save</button>
-                <button onClick={() => onDecision(clip.id, "Needs Review")}>Needs Review</button>
-                <button onClick={() => onEdit(clip.id)}>Edit Caption</button>
+                <button onClick={() => onDecision(clip.id, "Saved")}>Keep Clip</button>
                 <button className="danger-button" onClick={() => onDecision(clip.id, "Discarded")}>
-                  Discard
+                  Reject
                 </button>
+                <button onClick={() => onEdit(clip.id)}>Edit Caption</button>
               </div>
             </article>
           ))}
@@ -611,6 +722,53 @@ function HumanReviewQueue({ clips, onDecision }: { clips: SuggestedClip[]; onDec
               </div>
             </article>
           ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ExportPanel({
+  clips,
+  exportComplete,
+  onExport,
+}: {
+  clips: SuggestedClip[];
+  exportComplete: boolean;
+  onExport: () => void;
+}) {
+  return (
+    <section className="panel export-panel">
+      <PanelTitle title="Export Area" subtitle="Fake export for kept clips" />
+      {clips.length === 0 ? (
+        <EmptyState text="Keep a clip to stage it for export." />
+      ) : (
+        <div className="post-list">
+          {clips.map((clip) => (
+            <article className="post-card" key={clip.id}>
+              <div className="post-score">{clip.clipScore}</div>
+              <div>
+                <span className={`moment-badge ${momentStyles[clip.momentType]}`}>{clip.momentType}</span>
+                <h3>{clip.finalCaption}</h3>
+                <p>
+                  {clip.eventType} by {clip.player}
+                </p>
+                <div className="platforms">
+                  <span>TikTok</span>
+                  <span>YouTube Shorts</span>
+                  <span>Instagram Reels</span>
+                </div>
+              </div>
+            </article>
+          ))}
+          <button className="primary-button export-button" onClick={onExport}>
+            Export {clips.length} kept clip{clips.length === 1 ? "" : "s"}
+          </button>
+          {exportComplete ? (
+            <div className="export-complete">
+              Export package ready: captions, moment tags, and platform targets queued.
+            </div>
+          ) : null}
         </div>
       )}
     </section>

@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import type { Plugin } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import react from "@vitejs/plugin-react";
@@ -102,18 +102,30 @@ function normalizeClip(clip: ClaudeClip, fallbackEvent: GameplayEvent): ClaudeCl
   };
 }
 
-function claudeAnalyzePlugin(): Plugin {
+function claudeAnalyzePlugin({ apiKey, model }: { apiKey?: string; model: string }): Plugin {
   return {
     name: "roasty-lite-claude-analyze",
     configureServer(server) {
+      server.middlewares.use("/api/ai-status", (req, res, next) => {
+        if (req.method !== "GET") {
+          next();
+          return;
+        }
+
+        sendJson(res, 200, {
+          hasAnthropicKey: Boolean(apiKey?.trim()),
+          model,
+        });
+      });
+
       server.middlewares.use("/api/analyze", async (req, res, next) => {
         if (req.method !== "POST") {
           next();
           return;
         }
 
-        const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-        if (!apiKey) {
+        const trimmedApiKey = apiKey?.trim();
+        if (!trimmedApiKey) {
           sendJson(res, 503, { error: "ANTHROPIC_API_KEY is not set. Using offline mock scoring." });
           return;
         }
@@ -131,11 +143,11 @@ function claudeAnalyzePlugin(): Plugin {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "x-api-key": apiKey,
+              "x-api-key": trimmedApiKey,
               "anthropic-version": "2023-06-01",
             },
             body: JSON.stringify({
-              model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
+              model,
               max_tokens: 3200,
               temperature: 0.35,
               system:
@@ -194,7 +206,7 @@ ${JSON.stringify(events, null, 2)}`,
           }
 
           sendJson(res, 200, {
-            source: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
+            source: model,
             clips,
           });
         } catch (error) {
@@ -205,6 +217,11 @@ ${JSON.stringify(events, null, 2)}`,
   };
 }
 
-export default defineConfig({
-  plugins: [react(), claudeAnalyzePlugin()],
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
+  const model = env.ANTHROPIC_MODEL || "claude-sonnet-4-5";
+
+  return {
+    plugins: [react(), claudeAnalyzePlugin({ apiKey: env.ANTHROPIC_API_KEY, model })],
+  };
 });
